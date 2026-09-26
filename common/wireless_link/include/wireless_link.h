@@ -27,9 +27,25 @@ typedef struct {
     uint8_t rts;
 } __attribute__((packed)) wireless_uart_config_t;
 
+typedef struct {
+    uint32_t tx_success;
+    uint32_t tx_fail;
+    uint32_t tx_busy;
+    uint32_t tx_dropped;
+    uint32_t rx_frames;
+    uint32_t dap_requests;
+    uint32_t dap_retries;
+    uint32_t dap_timeouts;
+    uint32_t uart_dropped;
+    uint32_t last_dap_latency_us;
+    int8_t last_rssi_dbm;
+} wireless_link_stats_t;
+
 esp_err_t wireless_link_init(wireless_link_role_t role);
 bool wireless_link_is_connected(void);
 void wireless_link_get_peer_mac(uint8_t mac[6]);
+void wireless_link_get_stats(wireless_link_stats_t *stats);
+void wireless_link_reset_stats(void);
 
 esp_err_t wireless_link_dap_exchange(const uint8_t request[WIRELESS_LINK_DAP_PACKET_SIZE],
                                      uint8_t response[WIRELESS_LINK_DAP_PACKET_SIZE],

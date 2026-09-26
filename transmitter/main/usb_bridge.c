@@ -1,9 +1,11 @@
 #include "usb_bridge.h"
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -121,7 +123,13 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
         size = sizeof(request);
     }
     memcpy(request, buffer, size);
-    (void)xQueueSend(s_dap_queue, request, 0);
+    const BaseType_t queued = xQueueSend(s_dap_queue, request, 0);
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+    ESP_LOGI(TAG, "hid_rx size=%u queued=%s at=%" PRId64 " us", size,
+             queued == pdTRUE ? "yes" : "no", esp_timer_get_time());
+#else
+    (void)queued;
+#endif
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
@@ -196,6 +204,9 @@ static void dap_task(void *argument)
             continue;
         }
         memset(response, 0, sizeof(response));
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+        const int64_t exchange_start_us = esp_timer_get_time();
+#endif
         if (!handle_local_dap(request, response)) {
             esp_err_t ret = wireless_link_dap_exchange(
                 request, response, pdMS_TO_TICKS(1500));
@@ -206,6 +217,10 @@ static void dap_task(void *argument)
             } else {
                 status_led_pulse_activity();
             }
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+            ESP_LOGI(TAG, "dap_exchange elapsed=%" PRId64 " us",
+                     esp_timer_get_time() - exchange_start_us);
+#endif
         }
 
         while (!tud_hid_ready()) {

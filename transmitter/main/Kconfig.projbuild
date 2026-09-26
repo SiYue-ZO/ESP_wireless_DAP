@@ -16,4 +16,30 @@ config WIRELESS_DAP_WIFI_CHANNEL
     range 1 13
     default 6
 
+config WIRELESS_DAP_TX_DELAY_MS
+    int "ESP-NOW TX pacing delay (ms)"
+    range 0 20
+    default 2
+    help
+        Delay after an accepted ESP-NOW frame. Keep 2 ms for the original
+        baseline; use 0 or 1 ms only after checking send failures.
+
+config WIRELESS_DAP_ESPNOW_PHY_RATE
+    int "ESP-NOW peer PHY rate"
+    range 0 3
+    default 0
+    help
+        0: driver default, 1: 11 Mbps, 2: HT20 MCS2, 3: HT20 MCS3.
+
+config WIRELESS_DAP_DAP_RETRY_MS
+    int "DAP response retry interval (ms)"
+    range 5 200
+    default 45
+
+config WIRELESS_DAP_DIAGNOSTICS
+    bool "Enable wireless performance diagnostics"
+    default n
+    help
+        Log DAP latency and a five-second wireless link statistics summary.
+
 endmenu

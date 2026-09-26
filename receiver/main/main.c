@@ -5,6 +5,7 @@
 #include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -103,7 +104,14 @@ static void dap_task(void *argument)
             continue;
         }
         memset(response, 0, sizeof(response));
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+        const int64_t execute_start_us = esp_timer_get_time();
+#endif
         (void)dap_protocol_execute(request, sizeof(request), response);
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+        ESP_LOGI(TAG, "dap seq=%u execute=%" PRId64 " us", sequence,
+                 esp_timer_get_time() - execute_start_us);
+#endif
         if (wireless_link_dap_reply(sequence, response) == ESP_OK) {
             status_led_pulse_activity();
         }

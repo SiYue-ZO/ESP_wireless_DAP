@@ -23,7 +23,15 @@
 #define LINK_HELLO_PERIOD_MS 500U
 #define LINK_HEARTBEAT_PERIOD_MS 1000U
 #define LINK_LOST_TIMEOUT_MS 3500U
-#define LINK_DAP_RETRY_MS 45U
+#ifndef CONFIG_WIRELESS_DAP_DAP_RETRY_MS
+#define CONFIG_WIRELESS_DAP_DAP_RETRY_MS 45
+#endif
+#ifndef CONFIG_WIRELESS_DAP_TX_DELAY_MS
+#define CONFIG_WIRELESS_DAP_TX_DELAY_MS 2
+#endif
+#ifndef CONFIG_WIRELESS_DAP_DIAGNOSTICS
+#define CONFIG_WIRELESS_DAP_DIAGNOSTICS 0
+#endif
 
 typedef enum {
     FRAME_HELLO = 1,
@@ -69,7 +77,8 @@ static const uint8_t s_broadcast_mac[ESP_NOW_ETH_ALEN] = {
 };
 
 static wireless_link_role_t s_role;
-static QueueHandle_t s_tx_queue;
+static QueueHandle_t s_dap_tx_queue;
+static QueueHandle_t s_control_tx_queue;
 static QueueHandle_t s_dap_request_queue;
 static QueueHandle_t s_dap_response_queue;
 static QueueHandle_t s_uart_queue;
@@ -80,6 +89,7 @@ static uint8_t s_peer_mac[ESP_NOW_ETH_ALEN];
 static volatile bool s_connected;
 static volatile int64_t s_last_rx_us;
 static uint16_t s_next_sequence;
+static wireless_link_stats_t s_stats;
 
 static bool s_dap_inflight;
 static uint16_t s_dap_inflight_sequence;
@@ -138,7 +148,36 @@ static esp_err_t add_peer(const uint8_t *mac)
     };
     memcpy(peer.peer_addr, mac, ESP_NOW_ETH_ALEN);
     esp_err_t ret = esp_now_add_peer(&peer);
-    return ret == ESP_ERR_ESPNOW_EXIST ? ESP_OK : ret;
+    if (ret != ESP_OK && ret != ESP_ERR_ESPNOW_EXIST) {
+        return ret;
+    }
+
+#if CONFIG_WIRELESS_DAP_ESPNOW_PHY_RATE != 0
+    bool is_broadcast = true;
+    for (size_t i = 0; i < ESP_NOW_ETH_ALEN; ++i) {
+        is_broadcast = is_broadcast && mac[i] == 0xffU;
+    }
+    if (is_broadcast) {
+        return ESP_OK;
+    }
+    esp_now_rate_config_t rate = {
+        .phymode = WIFI_PHY_MODE_HT20,
+        .rate = WIFI_PHY_RATE_MCS2_LGI,
+        .ersu = false,
+        .dcm = false,
+    };
+#if CONFIG_WIRELESS_DAP_ESPNOW_PHY_RATE == 1
+    rate.phymode = WIFI_PHY_MODE_11B;
+    rate.rate = WIFI_PHY_RATE_11M_L;
+#elif CONFIG_WIRELESS_DAP_ESPNOW_PHY_RATE == 3
+    rate.rate = WIFI_PHY_RATE_MCS3_LGI;
+#endif
+    ret = esp_now_set_peer_rate_config(mac, &rate);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "set peer PHY rate failed: %s", esp_err_to_name(ret));
+    }
+#endif
+    return ESP_OK;
 }
 
 static bool set_connected_peer(const uint8_t *mac)
@@ -187,7 +226,19 @@ static esp_err_t queue_tx(bool broadcast, frame_type_t type, uint16_t sequence,
     if (length != 0U) {
         memcpy(item.data, data, length);
     }
-    return xQueueSend(s_tx_queue, &item, timeout) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+    QueueHandle_t queue = type == FRAME_DAP_REQUEST || type == FRAME_DAP_RESPONSE
+                              ? s_dap_tx_queue
+                              : s_control_tx_queue;
+    if (xQueueSend(queue, &item, timeout) == pdTRUE) {
+        return ESP_OK;
+    }
+    portENTER_CRITICAL(&s_state_lock);
+    s_stats.tx_dropped++;
+    if (type == FRAME_UART_DATA || type == FRAME_UART_CONFIG) {
+        s_stats.uart_dropped++;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return ESP_ERR_TIMEOUT;
 }
 
 static void handle_dap_request(const link_frame_t *frame)
@@ -253,6 +304,10 @@ static void handle_rx(const uint8_t *source_mac, const uint8_t *data, int length
         return;
     }
 
+    portENTER_CRITICAL(&s_state_lock);
+    s_stats.rx_frames++;
+    portEXIT_CRITICAL(&s_state_lock);
+
     if (frame.type == FRAME_HELLO || frame.type == FRAME_HELLO_ACK) {
         const bool accepted = set_connected_peer(source_mac);
         if (accepted && frame.type == FRAME_HELLO) {
@@ -309,13 +364,24 @@ static void handle_rx(const uint8_t *source_mac, const uint8_t *data, int length
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int length)
 {
+    if (info != NULL && info->rx_ctrl != NULL) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_stats.last_rssi_dbm = info->rx_ctrl->rssi;
+        portEXIT_CRITICAL(&s_state_lock);
+    }
     handle_rx(info == NULL ? NULL : info->src_addr, data, length);
 }
 
 static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
     (void)info;
-    (void)status;
+    portENTER_CRITICAL_ISR(&s_state_lock);
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        s_stats.tx_success++;
+    } else {
+        s_stats.tx_fail++;
+    }
+    portEXIT_CRITICAL_ISR(&s_state_lock);
 }
 
 static void tx_task(void *argument)
@@ -325,7 +391,8 @@ static void tx_task(void *argument)
     link_frame_t frame;
 
     while (true) {
-        if (xQueueReceive(s_tx_queue, &item, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_dap_tx_queue, &item, 0) != pdTRUE &&
+            xQueueReceive(s_control_tx_queue, &item, pdMS_TO_TICKS(1)) != pdTRUE) {
             continue;
         }
 
@@ -357,11 +424,27 @@ static void tx_task(void *argument)
         }
 
         const size_t frame_length = offsetof(link_frame_t, payload) + item.length;
-        esp_err_t ret = esp_now_send(destination, (const uint8_t *)&frame, frame_length);
+        esp_err_t ret = ESP_FAIL;
+        TickType_t busy_backoff = 0;
+        for (uint8_t attempt = 0; attempt < 4U; ++attempt) {
+            ret = esp_now_send(destination, (const uint8_t *)&frame, frame_length);
+            if (ret != ESP_ERR_ESPNOW_NO_MEM) {
+                break;
+            }
+            portENTER_CRITICAL(&s_state_lock);
+            s_stats.tx_busy++;
+            portEXIT_CRITICAL(&s_state_lock);
+            busy_backoff = pdMS_TO_TICKS(1U << attempt);
+            vTaskDelay(busy_backoff);
+        }
         if (ret != ESP_OK && ret != ESP_ERR_ESPNOW_NOT_FOUND) {
             ESP_LOGD(TAG, "send type %u failed: %s", item.type, esp_err_to_name(ret));
         }
-        vTaskDelay(pdMS_TO_TICKS(2));
+#if CONFIG_WIRELESS_DAP_TX_DELAY_MS > 0
+        if (ret == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(CONFIG_WIRELESS_DAP_TX_DELAY_MS));
+        }
+#endif
     }
 }
 
@@ -370,9 +453,28 @@ static void supervision_task(void *argument)
     (void)argument;
     TickType_t last_hello = 0;
     TickType_t last_heartbeat = 0;
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+    TickType_t last_stats = 0;
+#endif
 
     while (true) {
         TickType_t now = xTaskGetTickCount();
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+        if ((now - last_stats) >= pdMS_TO_TICKS(5000)) {
+            wireless_link_stats_t stats;
+            wireless_link_get_stats(&stats);
+            ESP_LOGI(TAG, "stats tx_ok=%" PRIu32 " tx_fail=%" PRIu32
+                          " busy=%" PRIu32 " drop=%" PRIu32
+                          " rx=%" PRIu32 " dap=%" PRIu32 " retry=%" PRIu32
+                          " timeout=%" PRIu32 " last_dap_us=%" PRIu32
+                          " rssi=%d dBm",
+                     stats.tx_success, stats.tx_fail, stats.tx_busy,
+                     stats.tx_dropped, stats.rx_frames, stats.dap_requests,
+                     stats.dap_retries, stats.dap_timeouts,
+                     stats.last_dap_latency_us, stats.last_rssi_dbm);
+            last_stats = now;
+        }
+#endif
         if (!wireless_link_is_connected()) {
             if ((now - last_hello) >= pdMS_TO_TICKS(LINK_HELLO_PERIOD_MS)) {
                 (void)queue_tx(true, FRAME_HELLO, 0, NULL, 0, 0);
@@ -398,7 +500,8 @@ static void supervision_task(void *argument)
                 s_dap_inflight = false;
                 s_dap_cache_valid = false;
                 portEXIT_CRITICAL(&s_state_lock);
-                xQueueReset(s_tx_queue);
+                xQueueReset(s_dap_tx_queue);
+                xQueueReset(s_control_tx_queue);
                 xQueueReset(s_dap_request_queue);
                 xQueueReset(s_dap_response_queue);
                 xQueueReset(s_uart_queue);
@@ -418,13 +521,14 @@ esp_err_t wireless_link_init(wireless_link_role_t role)
                         ESP_ERR_INVALID_ARG, TAG, "invalid role");
     s_role = role;
 
-    s_tx_queue = xQueueCreate(LINK_TX_QUEUE_DEPTH, sizeof(tx_item_t));
+    s_dap_tx_queue = xQueueCreate(8, sizeof(tx_item_t));
+    s_control_tx_queue = xQueueCreate(LINK_TX_QUEUE_DEPTH, sizeof(tx_item_t));
     s_dap_request_queue = xQueueCreate(4, sizeof(rx_item_t));
     s_dap_response_queue = xQueueCreate(4, sizeof(rx_item_t));
     s_uart_queue = xQueueCreate(LINK_QUEUE_DEPTH, sizeof(rx_item_t));
     s_uart_config_queue = xQueueCreate(1, sizeof(rx_item_t));
     s_dap_exchange_mutex = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_tx_queue && s_dap_request_queue && s_dap_response_queue &&
+    ESP_RETURN_ON_FALSE(s_dap_tx_queue && s_control_tx_queue && s_dap_request_queue && s_dap_response_queue &&
                             s_uart_queue && s_uart_config_queue && s_dap_exchange_mutex,
                         ESP_ERR_NO_MEM, TAG, "queue allocation failed");
 
@@ -504,30 +608,69 @@ esp_err_t wireless_link_dap_exchange(const uint8_t request[WIRELESS_LINK_DAP_PAC
 
     xQueueReset(s_dap_response_queue);
     const uint16_t sequence = next_sequence();
-    const TickType_t start = xTaskGetTickCount();
+    const int64_t start_us = esp_timer_get_time();
+    uint32_t retries = 0;
+    portENTER_CRITICAL(&s_state_lock);
+    s_stats.dap_requests++;
+    portEXIT_CRITICAL(&s_state_lock);
     esp_err_t result = ESP_ERR_TIMEOUT;
     rx_item_t item;
 
-    while ((xTaskGetTickCount() - start) < timeout) {
+    const TickType_t start_tick = xTaskGetTickCount();
+    while ((xTaskGetTickCount() - start_tick) < timeout) {
         if (!wireless_link_is_connected()) {
             result = ESP_ERR_INVALID_STATE;
             break;
         }
-        (void)queue_tx(false, FRAME_DAP_REQUEST, sequence, request,
-                       WIRELESS_LINK_DAP_PACKET_SIZE, pdMS_TO_TICKS(10));
+        if (queue_tx(false, FRAME_DAP_REQUEST, sequence, request,
+                     WIRELESS_LINK_DAP_PACKET_SIZE, pdMS_TO_TICKS(10)) != ESP_OK) {
+            result = ESP_ERR_TIMEOUT;
+            break;
+        }
 
         if (xQueueReceive(s_dap_response_queue, &item,
-                          pdMS_TO_TICKS(LINK_DAP_RETRY_MS)) == pdTRUE &&
+                          pdMS_TO_TICKS(CONFIG_WIRELESS_DAP_DAP_RETRY_MS)) == pdTRUE &&
             item.sequence == sequence &&
             item.length == WIRELESS_LINK_DAP_PACKET_SIZE) {
             memcpy(response, item.data, WIRELESS_LINK_DAP_PACKET_SIZE);
             result = ESP_OK;
             break;
         }
+        retries++;
     }
+
+    const uint32_t elapsed_us = (uint32_t)(esp_timer_get_time() - start_us);
+    portENTER_CRITICAL(&s_state_lock);
+    s_stats.dap_retries += retries;
+    s_stats.last_dap_latency_us = elapsed_us;
+    if (result != ESP_OK) {
+        s_stats.dap_timeouts++;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+    ESP_LOGI(TAG, "dap seq=%u result=%s latency=%" PRIu32 " us retries=%" PRIu32,
+             sequence, esp_err_to_name(result), elapsed_us, retries);
+#endif
 
     xSemaphoreGive(s_dap_exchange_mutex);
     return result;
+}
+
+void wireless_link_get_stats(wireless_link_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_state_lock);
+    *stats = s_stats;
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+void wireless_link_reset_stats(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    memset(&s_stats, 0, sizeof(s_stats));
+    portEXIT_CRITICAL(&s_state_lock);
 }
 
 esp_err_t wireless_link_dap_receive(uint8_t request[WIRELESS_LINK_DAP_PACKET_SIZE],

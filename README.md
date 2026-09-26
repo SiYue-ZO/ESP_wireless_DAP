@@ -13,6 +13,8 @@ ESP-NOW 自动发现并通信，应用任务基于 ESP-IDF/FreeRTOS。
 - 支持 SWD 烧录和调试，不支持 JTAG。
 - USB CDC ACM 与目标 UART 双向桥接，打开串口时会同步波特率、数据位、校验位和停止位。
 - ESP-NOW 自动发现、心跳、断线重连、CRC32 校验，以及 DAP 请求重试和接收端去重。
+- 第一阶段低延迟参数：DAP 高优先级无线队列、可配置发送节流/重试间隔、可选 ESP-NOW
+  peer PHY 速率和诊断统计；默认值保持原始协议 v1 行为。
 - GPIO48 上的一颗 WS2812 显示启动、等待、连接、活动和错误状态。
 - 当前无线串口是 best-effort 通道：没有逐帧确认或流控，链路拥塞时可能丢数据，
   不适合传输固件文件或要求零丢包的数据流。
@@ -105,6 +107,17 @@ idf.py build
 
 - `Pair identifier`：默认 `0x57444150`。
 - `ESP-NOW Wi-Fi channel`：默认信道 6。
+
+第一阶段性能参数也应在两端保持一致：
+
+- `ESP-NOW TX pacing delay`：默认 2 ms；建议按 2、1、0 ms 顺序测试。
+- `ESP-NOW peer PHY rate`：0 为驱动默认，1 为 11 Mbps，2/3 为 HT20 MCS2/MCS3。
+- `DAP response retry interval`：默认 45 ms；应以链路 P99 延迟加余量为准调整。
+
+接收端另有 `Default SWD clock`，默认 1 MHz。确认目标和连线稳定后再测试 2-4 MHz；
+主机发送 `DAP_SWJ_Clock` 后仍会动态覆盖该初始值。打开 `Enable wireless performance
+diagnostics` 后，两端会输出 DAP 延迟、执行时间、发送成功/失败、拥塞、丢包和重试摘要，
+用于建立第一阶段基线和对比测试。
 
 接收端还可配置 LED、SWD、复位和 UART 引脚，以及初始串口波特率。修改公共配置时，
 需要分别进入两个工程修改并重新烧录。
