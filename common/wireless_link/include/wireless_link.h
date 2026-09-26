@@ -12,6 +12,11 @@ extern "C" {
 #endif
 #define WIRELESS_LINK_DAP_PACKET_SIZE 64U
 #define WIRELESS_LINK_UART_MTU 192U
+#define WIRELESS_LINK_PROTOCOL_V1 1U
+#define WIRELESS_LINK_PROTOCOL_V2 2U
+#define WIRELESS_LINK_CAP_DAP64 (1U << 0)
+#define WIRELESS_LINK_CAP_BULK_USB (1U << 1)
+#define WIRELESS_LINK_CAP_WINDOW (1U << 2)
 
 typedef enum {
     WIRELESS_LINK_ROLE_TRANSMITTER = 1,
@@ -26,6 +31,14 @@ typedef struct {
     uint8_t dtr;
     uint8_t rts;
 } __attribute__((packed)) wireless_uart_config_t;
+
+typedef struct {
+    uint16_t max_dap_packet_size;
+    uint16_t max_payload_size;
+    uint8_t packet_window;
+    uint8_t flags;
+    uint16_t reserved;
+} __attribute__((packed)) wireless_link_capabilities_t;
 
 typedef struct {
     uint32_t tx_success;
@@ -44,6 +57,7 @@ typedef struct {
 esp_err_t wireless_link_init(wireless_link_role_t role);
 bool wireless_link_is_connected(void);
 void wireless_link_get_peer_mac(uint8_t mac[6]);
+bool wireless_link_get_peer_capabilities(wireless_link_capabilities_t *capabilities);
 void wireless_link_get_stats(wireless_link_stats_t *stats);
 void wireless_link_reset_stats(void);
 

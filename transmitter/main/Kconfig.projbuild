@@ -16,6 +16,22 @@ config WIRELESS_DAP_WIFI_CHANNEL
     range 1 13
     default 6
 
+config WIRELESS_DAP_PROTOCOL_VERSION
+    int "Wireless protocol version"
+    range 1 2
+    default 1
+    help
+        Version 1 is the stable 64-byte HID baseline. Version 2 enables the
+        capability-negotiation skeleton; both boards must use the same value.
+
+config WIRELESS_DAP_V2_PACKET_WINDOW
+    int "Protocol v2 packet window"
+    range 1 1
+    default 1
+    depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
+    help
+        The first v2 implementation is ordered and uses window 1.
+
 config WIRELESS_DAP_TX_DELAY_MS
     int "ESP-NOW TX pacing delay (ms)"
     range 0 20

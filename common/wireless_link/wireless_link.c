@@ -17,7 +17,6 @@
 #include "sdkconfig.h"
 
 #define LINK_MAGIC 0x50414457UL /* "WDAP" in little endian */
-#define LINK_VERSION 1U
 #define LINK_QUEUE_DEPTH 16U
 #define LINK_TX_QUEUE_DEPTH 24U
 #define LINK_HELLO_PERIOD_MS 500U
@@ -32,6 +31,19 @@
 #ifndef CONFIG_WIRELESS_DAP_DIAGNOSTICS
 #define CONFIG_WIRELESS_DAP_DIAGNOSTICS 0
 #endif
+#ifndef CONFIG_WIRELESS_DAP_PROTOCOL_VERSION
+#define CONFIG_WIRELESS_DAP_PROTOCOL_VERSION WIRELESS_LINK_PROTOCOL_V1
+#endif
+#ifndef CONFIG_WIRELESS_DAP_V2_PACKET_WINDOW
+#define CONFIG_WIRELESS_DAP_V2_PACKET_WINDOW 1
+#endif
+
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION != WIRELESS_LINK_PROTOCOL_V1 && \
+    CONFIG_WIRELESS_DAP_PROTOCOL_VERSION != WIRELESS_LINK_PROTOCOL_V2
+#error "CONFIG_WIRELESS_DAP_PROTOCOL_VERSION must be 1 or 2"
+#endif
+
+#define LINK_VERSION CONFIG_WIRELESS_DAP_PROTOCOL_VERSION
 
 typedef enum {
     FRAME_HELLO = 1,
@@ -96,6 +108,31 @@ static uint16_t s_dap_inflight_sequence;
 static bool s_dap_cache_valid;
 static uint16_t s_dap_cache_sequence;
 static uint8_t s_dap_cache_response[WIRELESS_LINK_DAP_PACKET_SIZE];
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+static wireless_link_capabilities_t s_peer_capabilities;
+static bool s_peer_capabilities_valid;
+
+static wireless_link_capabilities_t local_capabilities(void)
+{
+    return (wireless_link_capabilities_t) {
+        .max_dap_packet_size = WIRELESS_LINK_DAP_PACKET_SIZE,
+        .max_payload_size = WIRELESS_LINK_UART_MTU,
+        .packet_window = CONFIG_WIRELESS_DAP_V2_PACKET_WINDOW,
+        .flags = WIRELESS_LINK_CAP_DAP64,
+        .reserved = 0,
+    };
+}
+
+static bool capabilities_compatible(const wireless_link_capabilities_t *peer)
+{
+    if (peer == NULL) {
+        return false;
+    }
+    return peer->max_dap_packet_size >= WIRELESS_LINK_DAP_PACKET_SIZE &&
+           peer->max_payload_size >= WIRELESS_LINK_DAP_PACKET_SIZE &&
+           peer->packet_window >= 1U;
+}
+#endif
 
 static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t length)
 {
@@ -309,9 +346,38 @@ static void handle_rx(const uint8_t *source_mac, const uint8_t *data, int length
     portEXIT_CRITICAL(&s_state_lock);
 
     if (frame.type == FRAME_HELLO || frame.type == FRAME_HELLO_ACK) {
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+        wireless_link_capabilities_t peer_capabilities = {0};
+        if (frame.payload_length != sizeof(peer_capabilities)) {
+            ESP_LOGW(TAG, "protocol v2 peer omitted capabilities");
+            return;
+        }
+        memcpy(&peer_capabilities, frame.payload, sizeof(peer_capabilities));
+        if (!capabilities_compatible(&peer_capabilities)) {
+            ESP_LOGW(TAG, "incompatible protocol v2 capabilities");
+            return;
+        }
+#else
+        if (frame.payload_length != 0U) {
+            return;
+        }
+#endif
         const bool accepted = set_connected_peer(source_mac);
+        if (accepted) {
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+            portENTER_CRITICAL(&s_state_lock);
+            s_peer_capabilities = peer_capabilities;
+            s_peer_capabilities_valid = true;
+            portEXIT_CRITICAL(&s_state_lock);
+#endif
+        }
         if (accepted && frame.type == FRAME_HELLO) {
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+            const wireless_link_capabilities_t local = local_capabilities();
+            (void)queue_tx(false, FRAME_HELLO_ACK, 0, &local, sizeof(local), 0);
+#else
             (void)queue_tx(false, FRAME_HELLO_ACK, 0, NULL, 0, 0);
+#endif
         }
         return;
     }
@@ -477,7 +543,12 @@ static void supervision_task(void *argument)
 #endif
         if (!wireless_link_is_connected()) {
             if ((now - last_hello) >= pdMS_TO_TICKS(LINK_HELLO_PERIOD_MS)) {
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+                const wireless_link_capabilities_t local = local_capabilities();
+                (void)queue_tx(true, FRAME_HELLO, 0, &local, sizeof(local), 0);
+#else
                 (void)queue_tx(true, FRAME_HELLO, 0, NULL, 0, 0);
+#endif
                 last_hello = now;
             }
         } else {
@@ -499,6 +570,10 @@ static void supervision_task(void *argument)
                 s_connected = false;
                 s_dap_inflight = false;
                 s_dap_cache_valid = false;
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+                s_peer_capabilities_valid = false;
+                memset(&s_peer_capabilities, 0, sizeof(s_peer_capabilities));
+#endif
                 portEXIT_CRITICAL(&s_state_lock);
                 xQueueReset(s_dap_tx_queue);
                 xQueueReset(s_control_tx_queue);
@@ -580,7 +655,11 @@ bool wireless_link_is_connected(void)
 {
     bool connected;
     portENTER_CRITICAL(&s_state_lock);
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+    connected = s_connected && s_peer_capabilities_valid;
+#else
     connected = s_connected;
+#endif
     portEXIT_CRITICAL(&s_state_lock);
     return connected;
 }
@@ -593,6 +672,26 @@ void wireless_link_get_peer_mac(uint8_t mac[6])
     portENTER_CRITICAL(&s_state_lock);
     memcpy(mac, s_peer_mac, ESP_NOW_ETH_ALEN);
     portEXIT_CRITICAL(&s_state_lock);
+}
+
+bool wireless_link_get_peer_capabilities(wireless_link_capabilities_t *capabilities)
+{
+    if (capabilities == NULL) {
+        return false;
+    }
+#if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION == WIRELESS_LINK_PROTOCOL_V2
+    bool valid;
+    portENTER_CRITICAL(&s_state_lock);
+    valid = s_peer_capabilities_valid;
+    if (valid) {
+        *capabilities = s_peer_capabilities;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return valid;
+#else
+    (void)capabilities;
+    return false;
+#endif
 }
 
 esp_err_t wireless_link_dap_exchange(const uint8_t request[WIRELESS_LINK_DAP_PACKET_SIZE],
