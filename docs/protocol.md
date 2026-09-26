@@ -5,8 +5,9 @@
 ## 协议版本
 
 - `protocol v1`：当前稳定基线，64 字节 DAP、经典 ESP-NOW payload 和 window=1。
-- `protocol v2`：第二阶段开发版本。帧版本字段为 2，发现阶段携带能力协商信息；当前
-  数据平面仍使用 64 字节 DAP 和 window=1，尚未启用大包或并行执行。
+- `protocol v2`：第二阶段开发版本。帧版本字段为 2，发现阶段携带能力协商信息；可在
+  发送端启用实验性的 CMSIS-DAP v2 Bulk USB 接口。无线数据平面仍使用 64 字节 DAP
+  和 window=1，尚未启用大包或并行执行。
 
 两端必须配置相同协议版本。v1 固件会拒绝 v2 帧，v2 固件也会拒绝没有能力信息的旧
 发现帧，不会猜测或混用帧格式。
@@ -63,11 +64,17 @@ CRC 后才处理帧。
 | `max_dap_packet_size` | 2 | 当前协商值为 64 |
 | `max_payload_size` | 2 | 当前协商值为 192 |
 | `packet_window` | 1 | 当前固定为 1 |
-| `flags` | 1 | 能力位，当前声明 DAP64 |
+| `flags` | 1 | bit0=DAP64；bit1=发送端已启用 Bulk USB；bit2=窗口能力（保留） |
 | `reserved` | 2 | 置零 |
 
 能力不满足对端最低要求时不会建立连接；后续启用 256 字节逻辑包、bulk USB 或
 window=2 时，将扩展这些能力位和字段，而不改变 v1 帧解析路径。
+
+发送端的 `Experimental CMSIS-DAP v2 bulk USB interface` 默认关闭，并且只允许在协议
+v2 且 TinyUSB Vendor interface count 为 1 时启用。启用后，USB 设备同时保留 HID64 和
+CDC ACM，新增接口字符串为 `CMSIS-DAP v2` 的 64 字节 Bulk IN/OUT 接口。Bulk 与 HID
+共用同一条串行 DAP 执行队列；此步骤用于先验证主机枚举和传输路径，不代表已经支持
+256 字节 CMSIS-DAP 包。
 
 ## DAP 可靠性
 

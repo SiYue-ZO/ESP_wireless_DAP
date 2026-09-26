@@ -35,11 +35,27 @@ typedef struct {
     uint8_t data[WIRELESS_LINK_UART_MTU];
 } serial_chunk_t;
 
+typedef enum {
+    DAP_TRANSPORT_HID,
+#if CONFIG_WIRELESS_DAP_USB_BULK_V2
+    DAP_TRANSPORT_BULK,
+#endif
+} dap_transport_t;
+
+typedef struct {
+    dap_transport_t transport;
+    uint8_t data[WIRELESS_LINK_DAP_PACKET_SIZE];
+} dap_request_t;
+
 static const char *TAG = "usb_bridge";
 static QueueHandle_t s_dap_queue;
 static QueueHandle_t s_serial_tx_queue;
 static QueueHandle_t s_serial_config_queue;
 static uint8_t s_cdc_callback_buffer[CONFIG_TINYUSB_CDC_RX_BUFSIZE];
+#if CONFIG_WIRELESS_DAP_USB_BULK_V2
+static uint8_t s_bulk_rx_buffer[WIRELESS_LINK_DAP_PACKET_SIZE];
+static size_t s_bulk_rx_length;
+#endif
 static wireless_uart_config_t s_uart_config = {
     .baud_rate = 115200,
     .data_bits = 8,
@@ -118,12 +134,14 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
         return;
     }
 
-    uint8_t request[WIRELESS_LINK_DAP_PACKET_SIZE] = {0};
-    if (size > sizeof(request)) {
-        size = sizeof(request);
+    dap_request_t request = {
+        .transport = DAP_TRANSPORT_HID,
+    };
+    if (size > sizeof(request.data)) {
+        size = sizeof(request.data);
     }
-    memcpy(request, buffer, size);
-    const BaseType_t queued = xQueueSend(s_dap_queue, request, 0);
+    memcpy(request.data, buffer, size);
+    const BaseType_t queued = xQueueSend(s_dap_queue, &request, 0);
 #if CONFIG_WIRELESS_DAP_DIAGNOSTICS
     ESP_LOGI(TAG, "hid_rx size=%u queued=%s at=%" PRId64 " us", size,
              queued == pdTRUE ? "yes" : "no", esp_timer_get_time());
@@ -131,6 +149,54 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     (void)queued;
 #endif
 }
+
+#if CONFIG_WIRELESS_DAP_USB_BULK_V2
+#if CFG_TUD_API_V0_19_COMPAT
+void tud_vendor_rx_cb(uint8_t interface, const uint8_t *buffer, uint16_t size)
+#else
+void tud_vendor_rx_cb(uint8_t interface, const uint8_t *buffer, uint32_t size)
+#endif
+{
+    (void)buffer;
+    (void)size;
+
+    while (tud_vendor_n_available(interface) != 0U) {
+        uint8_t chunk[WIRELESS_LINK_DAP_PACKET_SIZE];
+        const uint32_t read = tud_vendor_n_read(interface, chunk, sizeof(chunk));
+        if (read == 0U) {
+            break;
+        }
+        uint32_t offset = 0;
+        while (offset < read) {
+            const size_t available = sizeof(s_bulk_rx_buffer) - s_bulk_rx_length;
+            size_t copied = read - offset;
+            if (copied > available) {
+                copied = available;
+            }
+            memcpy(&s_bulk_rx_buffer[s_bulk_rx_length], &chunk[offset], copied);
+            s_bulk_rx_length += copied;
+            offset += (uint32_t)copied;
+            if (s_bulk_rx_length != sizeof(s_bulk_rx_buffer)) {
+                continue;
+            }
+
+            dap_request_t request = {
+                .transport = DAP_TRANSPORT_BULK,
+            };
+            memcpy(request.data, s_bulk_rx_buffer, sizeof(request.data));
+            const BaseType_t queued = xQueueSend(s_dap_queue, &request, 0);
+#if CONFIG_WIRELESS_DAP_DIAGNOSTICS
+            ESP_LOGI(TAG, "bulk_rx size=%u queued=%s at=%" PRId64 " us",
+                     (unsigned)sizeof(request.data),
+                     queued == pdTRUE ? "yes" : "no", esp_timer_get_time());
+#else
+            (void)queued;
+#endif
+            s_bulk_rx_length = 0;
+        }
+    }
+}
+#endif
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
                                hid_report_type_t report_type,
@@ -196,22 +262,24 @@ static void cdc_line_state_callback(int interface, cdcacm_event_t *event)
 static void dap_task(void *argument)
 {
     (void)argument;
-    uint8_t request[WIRELESS_LINK_DAP_PACKET_SIZE];
+    dap_request_t request;
     uint8_t response[WIRELESS_LINK_DAP_PACKET_SIZE];
 
     while (true) {
-        if (xQueueReceive(s_dap_queue, request, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_dap_queue, &request, portMAX_DELAY) != pdTRUE) {
             continue;
         }
         memset(response, 0, sizeof(response));
 #if CONFIG_WIRELESS_DAP_DIAGNOSTICS
         const int64_t exchange_start_us = esp_timer_get_time();
 #endif
-        if (!handle_local_dap(request, response)) {
+        if (!handle_local_dap(request.data, response)) {
             esp_err_t ret = wireless_link_dap_exchange(
-                request, response, pdMS_TO_TICKS(1500));
+                request.data, response, pdMS_TO_TICKS(1500));
             if (ret != ESP_OK) {
-                response[0] = request[0] == 0 ? DAP_COMMAND_INVALID : request[0];
+                response[0] = request.data[0] == 0
+                                  ? DAP_COMMAND_INVALID
+                                  : request.data[0];
                 response[1] = DAP_ERROR;
                 ESP_LOGW(TAG, "DAP exchange failed: %s", esp_err_to_name(ret));
             } else {
@@ -223,6 +291,19 @@ static void dap_task(void *argument)
 #endif
         }
 
+#if CONFIG_WIRELESS_DAP_USB_BULK_V2
+        if (request.transport == DAP_TRANSPORT_BULK) {
+            while (tud_vendor_mounted() &&
+                   tud_vendor_write_available() < sizeof(response)) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+            if (tud_vendor_mounted()) {
+                (void)tud_vendor_write(response, sizeof(response));
+                (void)tud_vendor_write_flush();
+            }
+            continue;
+        }
+#endif
         while (!tud_hid_ready()) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
@@ -280,7 +361,7 @@ static void wireless_to_serial_task(void *argument)
 
 esp_err_t usb_bridge_init(void)
 {
-    s_dap_queue = xQueueCreate(4, WIRELESS_LINK_DAP_PACKET_SIZE);
+    s_dap_queue = xQueueCreate(4, sizeof(dap_request_t));
     s_serial_tx_queue = xQueueCreate(16, sizeof(serial_chunk_t));
     s_serial_config_queue = xQueueCreate(1, sizeof(wireless_uart_config_t));
     ESP_RETURN_ON_FALSE(s_dap_queue && s_serial_tx_queue && s_serial_config_queue,
@@ -313,6 +394,10 @@ esp_err_t usb_bridge_init(void)
         ESP_ERR_NO_MEM, TAG, "create serial RX task failed");
 
     (void)xQueueOverwrite(s_serial_config_queue, &s_uart_config);
+#if CONFIG_WIRELESS_DAP_USB_BULK_V2
+    ESP_LOGI(TAG, "USB CMSIS-DAP HID + v2 bulk + CDC ACM ready");
+#else
     ESP_LOGI(TAG, "USB CMSIS-DAP v1 + CDC ACM ready");
+#endif
     return ESP_OK;
 }

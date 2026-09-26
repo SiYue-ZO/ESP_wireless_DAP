@@ -32,6 +32,17 @@ config WIRELESS_DAP_V2_PACKET_WINDOW
     help
         The first v2 implementation is ordered and uses window 1.
 
+config WIRELESS_DAP_USB_BULK_V2
+    bool "Enable experimental CMSIS-DAP v2 bulk USB interface"
+    default n
+    depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
+    depends on TINYUSB_VENDOR_COUNT = 1
+    help
+        Add a CMSIS-DAP v2 vendor-specific bulk interface alongside the
+        stable HID interface and CDC ACM. The initial implementation keeps
+        the logical DAP packet size at 64 bytes. Set TinyUSB Vendor specific
+        interfaces count to 1 before enabling this option.
+
 config WIRELESS_DAP_TX_DELAY_MS
     int "ESP-NOW TX pacing delay (ms)"
     range 0 20

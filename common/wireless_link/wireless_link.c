@@ -37,6 +37,9 @@
 #ifndef CONFIG_WIRELESS_DAP_V2_PACKET_WINDOW
 #define CONFIG_WIRELESS_DAP_V2_PACKET_WINDOW 1
 #endif
+#ifndef CONFIG_WIRELESS_DAP_USB_BULK_V2
+#define CONFIG_WIRELESS_DAP_USB_BULK_V2 0
+#endif
 
 #if CONFIG_WIRELESS_DAP_PROTOCOL_VERSION != WIRELESS_LINK_PROTOCOL_V1 && \
     CONFIG_WIRELESS_DAP_PROTOCOL_VERSION != WIRELESS_LINK_PROTOCOL_V2
@@ -118,7 +121,12 @@ static wireless_link_capabilities_t local_capabilities(void)
         .max_dap_packet_size = WIRELESS_LINK_DAP_PACKET_SIZE,
         .max_payload_size = WIRELESS_LINK_UART_MTU,
         .packet_window = CONFIG_WIRELESS_DAP_V2_PACKET_WINDOW,
-        .flags = WIRELESS_LINK_CAP_DAP64,
+        .flags = WIRELESS_LINK_CAP_DAP64 |
+#if CONFIG_WIRELESS_DAP_USB_BULK_V2
+                 WIRELESS_LINK_CAP_BULK_USB,
+#else
+                 0,
+#endif
         .reserved = 0,
     };
 }
