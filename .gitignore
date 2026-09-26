@@ -1,0 +1,19 @@
+# ESP-IDF build output
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# Editors and host artifacts
+.vscode/
+.idea/
+.cache/
+.DS_Store
+*.pyc
+__pycache__/
+
+# Generated firmware artifacts
+*.bin
+*.elf
+*.map
+*.hex

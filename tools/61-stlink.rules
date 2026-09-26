@@ -1,0 +1,2 @@
+# STMicroelectronics ST-LINK/V2 for OpenOCD
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", TAG+="uaccess"

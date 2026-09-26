@@ -1,0 +1,49 @@
+menu "Wireless DAP receiver"
+
+config WIRELESS_DAP_LED_GPIO
+    int "WS2812 data GPIO"
+    range 0 48
+    default 48
+
+config WIRELESS_DAP_PAIR_ID
+    hex "Pair identifier"
+    default 0x57444150
+    help
+        Both boards must use the same value. It separates nearby probe pairs.
+
+config WIRELESS_DAP_WIFI_CHANNEL
+    int "ESP-NOW Wi-Fi channel"
+    range 1 13
+    default 6
+
+config WIRELESS_DAP_UART_TX_GPIO
+    int "Target UART TX GPIO"
+    range 0 48
+    default 17
+
+config WIRELESS_DAP_UART_RX_GPIO
+    int "Target UART RX GPIO"
+    range 0 48
+    default 18
+
+config WIRELESS_DAP_UART_BAUD
+    int "Initial target UART baud rate"
+    range 1200 3000000
+    default 115200
+
+config WIRELESS_DAP_SWD_CLK_GPIO
+    int "Target SWCLK GPIO"
+    range 0 48
+    default 9
+
+config WIRELESS_DAP_SWD_IO_GPIO
+    int "Target SWDIO GPIO"
+    range 0 48
+    default 10
+
+config WIRELESS_DAP_RESET_GPIO
+    int "Target nRESET GPIO"
+    range 0 48
+    default 4
+
+endmenu

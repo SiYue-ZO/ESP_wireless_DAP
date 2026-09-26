@@ -1,0 +1,51 @@
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+#define WIRELESS_LINK_DAP_PACKET_SIZE 64U
+#define WIRELESS_LINK_UART_MTU 192U
+
+typedef enum {
+    WIRELESS_LINK_ROLE_TRANSMITTER = 1,
+    WIRELESS_LINK_ROLE_RECEIVER = 2,
+} wireless_link_role_t;
+
+typedef struct {
+    uint32_t baud_rate;
+    uint8_t data_bits;
+    uint8_t parity;
+    uint8_t stop_bits;
+    uint8_t dtr;
+    uint8_t rts;
+} __attribute__((packed)) wireless_uart_config_t;
+
+esp_err_t wireless_link_init(wireless_link_role_t role);
+bool wireless_link_is_connected(void);
+void wireless_link_get_peer_mac(uint8_t mac[6]);
+
+esp_err_t wireless_link_dap_exchange(const uint8_t request[WIRELESS_LINK_DAP_PACKET_SIZE],
+                                     uint8_t response[WIRELESS_LINK_DAP_PACKET_SIZE],
+                                     TickType_t timeout);
+esp_err_t wireless_link_dap_receive(uint8_t request[WIRELESS_LINK_DAP_PACKET_SIZE],
+                                    uint16_t *sequence, TickType_t timeout);
+esp_err_t wireless_link_dap_reply(uint16_t sequence,
+                                  const uint8_t response[WIRELESS_LINK_DAP_PACKET_SIZE]);
+
+esp_err_t wireless_link_uart_send(const uint8_t *data, size_t length);
+esp_err_t wireless_link_uart_receive(uint8_t *data, size_t capacity,
+                                     size_t *length, TickType_t timeout);
+esp_err_t wireless_link_uart_send_config(const wireless_uart_config_t *config);
+esp_err_t wireless_link_uart_receive_config(wireless_uart_config_t *config,
+                                            TickType_t timeout);
+
+#ifdef __cplusplus
+}
+#endif

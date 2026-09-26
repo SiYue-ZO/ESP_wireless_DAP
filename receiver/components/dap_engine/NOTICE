@@ -1,0 +1,13 @@
+The CMSIS-DAP command parser and ESP32-S3 GPIO/SWD implementation in this
+component were adapted from the user's fork:
+
+  https://github.com/SiYue-ZO/ESP32S3_Wireless_CMSIS_DAP
+
+The fork traces its implementation to:
+
+  https://github.com/masbc666/ESP32S3_Wireless_CMSIS_DAP
+
+The referenced repository did not declare a repository-level license when this
+project was created. Keep this notice with the component and confirm licensing
+before redistributing a binary or source package outside your own development
+environment.

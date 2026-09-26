@@ -1,0 +1,19 @@
+menu "Wireless DAP transmitter"
+
+config WIRELESS_DAP_LED_GPIO
+    int "WS2812 data GPIO"
+    range 0 48
+    default 48
+
+config WIRELESS_DAP_PAIR_ID
+    hex "Pair identifier"
+    default 0x57444150
+    help
+        Both boards must use the same value. It separates nearby probe pairs.
+
+config WIRELESS_DAP_WIFI_CHANNEL
+    int "ESP-NOW Wi-Fi channel"
+    range 1 13
+    default 6
+
+endmenu
