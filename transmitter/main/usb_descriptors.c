@@ -29,7 +29,6 @@ enum {
 #define EPNUM_CDC_IN 0x83
 #define EPNUM_DAP_V2_OUT 0x04
 #define EPNUM_DAP_V2_IN 0x84
-#define USB_PACKET_SIZE 64U
 #if CONFIG_WIRELESS_DAP_USB_BULK_V2
 #define USB_DAP_V2_DESC_LEN TUD_VENDOR_DESC_LEN
 #else
@@ -57,7 +56,7 @@ const tusb_desc_device_t g_usb_device_descriptor = {
 };
 
 const uint8_t g_usb_hid_report_descriptor[] = {
-    TUD_HID_REPORT_DESC_GENERIC_INOUT(USB_PACKET_SIZE)
+    TUD_HID_REPORT_DESC_GENERIC_INOUT(USB_DAP_ENDPOINT_PACKET_SIZE)
 };
 
 const uint8_t g_usb_configuration_descriptor[] = {
@@ -66,15 +65,18 @@ const uint8_t g_usb_configuration_descriptor[] = {
 
     TUD_HID_INOUT_DESCRIPTOR(ITF_NUM_DAP, STRID_DAP, HID_ITF_PROTOCOL_NONE,
                              sizeof(g_usb_hid_report_descriptor),
-                             EPNUM_DAP_OUT, EPNUM_DAP_IN, USB_PACKET_SIZE, 1),
+                             EPNUM_DAP_OUT, EPNUM_DAP_IN,
+                             USB_DAP_ENDPOINT_PACKET_SIZE, 1),
 
 #if CONFIG_WIRELESS_DAP_USB_BULK_V2
     TUD_VENDOR_DESCRIPTOR(ITF_NUM_DAP_V2, STRID_DAP_V2,
-                          EPNUM_DAP_V2_OUT, EPNUM_DAP_V2_IN, USB_PACKET_SIZE),
+                          EPNUM_DAP_V2_OUT, EPNUM_DAP_V2_IN,
+                          USB_DAP_ENDPOINT_PACKET_SIZE),
 #endif
 
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, STRID_CDC, EPNUM_CDC_NOTIFY, 8,
-                       EPNUM_CDC_OUT, EPNUM_CDC_IN, USB_PACKET_SIZE),
+                       EPNUM_CDC_OUT, EPNUM_CDC_IN,
+                       USB_DAP_ENDPOINT_PACKET_SIZE),
 };
 
 const char *g_usb_string_descriptors[] = {

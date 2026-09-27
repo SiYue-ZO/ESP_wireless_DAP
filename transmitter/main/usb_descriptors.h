@@ -5,6 +5,8 @@
 
 #include "tusb.h"
 
+#define USB_DAP_ENDPOINT_PACKET_SIZE 64U
+
 extern const tusb_desc_device_t g_usb_device_descriptor;
 extern const uint8_t g_usb_configuration_descriptor[];
 extern const uint8_t g_usb_hid_report_descriptor[];

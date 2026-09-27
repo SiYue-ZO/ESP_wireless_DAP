@@ -22,15 +22,27 @@ config WIRELESS_DAP_PROTOCOL_VERSION
     default 1
     help
         Version 1 is the stable 64-byte HID baseline. Version 2 enables the
-        capability-negotiation skeleton; both boards must use the same value.
+        capability negotiation and ESP-NOW v2 discovery frame; both boards
+        must use the same value and support ESP-NOW v2.
 
 config WIRELESS_DAP_V2_PACKET_WINDOW
     int "Protocol v2 packet window"
-    range 1 1
+    range 1 2
     default 1
     depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
     help
-        The first v2 implementation is ordered and uses window 1.
+        Allow one or two independent DAP requests in flight. The receiver
+        always executes requests in order. Both boards must support the
+        selected window; start with 1 for compatibility.
+
+config WIRELESS_DAP_WINDOW_WAIT_MS
+    int "Packet window collection wait (ms)"
+    range 0 10
+    default 1
+    depends on WIRELESS_DAP_V2_PACKET_WINDOW = 2
+    help
+        Time to wait for a second USB DAP request before sending a one-item
+        wireless window.
 
 config WIRELESS_DAP_USB_BULK_V2
     bool "Enable experimental CMSIS-DAP v2 bulk USB interface"
@@ -39,9 +51,46 @@ config WIRELESS_DAP_USB_BULK_V2
     depends on TINYUSB_VENDOR_COUNT = 1
     help
         Add a CMSIS-DAP v2 vendor-specific bulk interface alongside the
-        stable HID interface and CDC ACM. The initial implementation keeps
-        the logical DAP packet size at 64 bytes. Set TinyUSB Vendor specific
+        stable HID interface and CDC ACM. Set TinyUSB Vendor specific
         interfaces count to 1 before enabling this option.
+
+choice WIRELESS_DAP_V2_DAP_PACKET_SIZE
+    prompt "Protocol v2 DAP packet size"
+    default WIRELESS_DAP_V2_DAP_PACKET_64
+    depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
+
+config WIRELESS_DAP_V2_DAP_PACKET_64
+    bool "64 bytes"
+
+config WIRELESS_DAP_V2_DAP_PACKET_256
+    bool "256 bytes"
+
+endchoice
+
+config WIRELESS_DAP_DAP_PACKET_SIZE
+    int
+    default 256 if WIRELESS_DAP_V2_DAP_PACKET_256
+    default 64
+
+config WIRELESS_DAP_HID_AGGREGATION
+    bool "Enable experimental HID64 request aggregation"
+    default n
+    depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
+    depends on WIRELESS_DAP_V2_DAP_PACKET_256
+    depends on WIRELESS_DAP_V2_PACKET_WINDOW = 1
+    help
+        Advertise three HID packet slots and combine up to three compatible
+        64-byte CMSIS-DAP requests into one 256-byte wireless exchange. Enable
+        the matching receiver option. Bulk requests remain unaggregated.
+
+config WIRELESS_DAP_HID_AGGREGATION_WAIT_MS
+    int "HID aggregation wait (ms)"
+    range 0 10
+    default 1
+    depends on WIRELESS_DAP_HID_AGGREGATION
+    help
+        Time to wait for a second HID request after receiving the first one.
+        Any additional already queued request is collected without waiting.
 
 config WIRELESS_DAP_TX_DELAY_MS
     int "ESP-NOW TX pacing delay (ms)"

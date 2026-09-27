@@ -1,3 +1,4 @@
-# ESP32-S3 Wireless CMSIS-DAP transmitter (HID + CDC ACM)
+# ESP32-S3 Wireless CMSIS-DAP transmitter (HID + bulk + CDC ACM)
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="4012", TAG+="uaccess"
 ACTION=="add|change", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4012", TAG+="uaccess"
 ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4012", TAG+="uaccess"

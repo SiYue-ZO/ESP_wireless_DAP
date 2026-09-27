@@ -4,8 +4,9 @@
 CMSIS-DAP v1 HID 和 CDC ACM 串口；接收端连接目标板的 SWD 与 UART。两端使用
 ESP-NOW 自动发现并通信，应用任务基于 ESP-IDF/FreeRTOS。
 
-> 当前版本是可编译的工程原型，尚未完成真实开发板与目标芯片联调。首次接线时请
-> 从低 SWD 频率开始，并先确认目标板电平和地线。
+> 当前版本已在 STM32F412 上完成 CMSIS-DAP v2 Bulk256、packet window=2 的 512 KiB
+> 连续烧录与校验测试。其他目标芯片首次接线时仍应从低 SWD 频率开始，并先确认目标板
+> 电平和地线；协议 v1/HID64 保持为默认兼容配置。
 
 ## 功能与限制
 
@@ -15,8 +16,9 @@ ESP-NOW 自动发现并通信，应用任务基于 ESP-IDF/FreeRTOS。
 - ESP-NOW 自动发现、心跳、断线重连、CRC32 校验，以及 DAP 请求重试和接收端去重。
 - 第一阶段低延迟参数：DAP 高优先级无线队列、可配置发送节流/重试间隔、可选 ESP-NOW
   peer PHY 速率和诊断统计；默认值保持原始协议 v1 行为。
-- 第二阶段当前提供协议 v2 的版本隔离和能力协商骨架，默认仍为协议 v1；v2 的大包、
-  bulk USB 和 packet window 尚未默认启用。
+- 第二阶段协议 v2 已使用 251 字节发现帧验证 ESP-NOW v2 并完成能力协商，可选
+  CMSIS-DAP v2 Bulk 64/256 字节逻辑包、HID64 三请求兼容聚合，以及严格顺序执行的
+  packet window=2；默认仍为协议 v1、HID64、聚合关闭和 window=1。
 - GPIO48 上的一颗 WS2812 显示启动、等待、连接、活动和错误状态。
 - 当前无线串口是 best-effort 通道：没有逐帧确认或流控，链路拥塞时可能丢数据，
   不适合传输固件文件或要求零丢包的数据流。
@@ -109,6 +111,31 @@ idf.py build
 
 - `Pair identifier`：默认 `0x57444150`。
 - `ESP-NOW Wi-Fi channel`：默认信道 6。
+- `Wireless protocol version`：默认稳定版本 1；测试 ESP-NOW v2 时两端同时设为 2。
+- `Protocol v2 DAP packet size`：v2 下默认 64，可选 256；两端必须选择相同值。
+- `Protocol v2 packet window`：默认 1，可选 2；发送端使用 2 时接收端也必须支持 2。
+
+协议 v2 下始终可以选择逻辑包长。Bulk 接口和 HID 兼容聚合都要求选择 256 字节；兼容
+HID 接口本身始终使用 64 字节请求和响应，接收端按每个无线请求的实际长度处理 HID64、
+Bulk256 或聚合后的 256 字节包。
+
+`Enable experimental HID64 request aggregation` 必须在两端同时启用，且默认关闭。启用后
+HID 的 `DAP_Info(Packet Count)` 返回 3；发送端收到第一个可聚合请求后默认等待 1 ms，
+最多把三个请求用标准 `DAP_ExecuteCommands` 封装到一次无线交换，再按原顺序拆成独立的
+64 字节响应。单个请求、Bulk 请求、本地 `DAP_Info`/`DAP_HostStatus`、未知命令和嵌套
+`QueueCommands`/`ExecuteCommands` 保持原路径。可通过 `HID aggregation wait` 调整等待；
+无线交换失败时批内每个请求都会得到独立错误响应。
+
+packet window=2 与 HID64 聚合互斥。启用窗口后，HID 和 Bulk 的
+`DAP_Info(Packet Count)` 返回 2；发送端默认等待 1 ms 收集第二个非本地 DAP 请求，再让
+两个请求同时进入无线传输。接收端仍由单任务严格按窗口索引执行 SWD，完成响应分别缓存；
+丢失某一响应时只重发对应请求，并直接返回缓存，不会重复执行 Flash 写入。USB 响应保持
+原请求顺序。本地 `DAP_Info`/`DAP_HostStatus` 会形成顺序屏障，可通过
+`Packet window collection wait` 调整收集等待。
+
+`DAP_TransferAbort` 是无 USB 响应的控制命令。发送端不会把它排到普通请求之后，而是通过
+高优先级无线控制帧通知接收端；接收端的独立高优先级任务会中止当前 Transfer/TransferBlock
+以及批内尚未开始的命令；window=2 下尚未执行的后一项也会被取消。
 
 第一阶段性能参数也应在两端保持一致：
 
@@ -163,7 +190,7 @@ idf.py -p /dev/ttyACM1 flash monitor
 
 ## 使用 OpenOCD
 
-发送端接入电脑并显示绿色后，先确认系统识别到 CMSIS-DAP HID。OpenOCD 的目标配置
+发送端接入电脑并显示绿色后，先确认系统识别到 CMSIS-DAP。OpenOCD 的目标配置
 需要替换成实际 MCU，例如：
 
 如果不能安装 udev 规则，可以只对本次 OpenOCD 进程使用 root 权限。该方式不写入
@@ -175,14 +202,15 @@ sudo -v                         # 可选：提前缓存一次 sudo 凭据
 ./tools/openocd-no-udev.sh \
   -s /usr/share/openocd/scripts \
   -f /path/to/stm32f4discovery.cfg \
-  -c "cmsis-dap backend hid" \
+  -c "cmsis-dap backend usb_bulk" \
   -c "adapter usb vid_pid 0x303a 0x4012" \
   -c "adapter speed 500" \
   -c "program /path/to/test_dap.elf verify reset exit"
 ```
 
-`cmsis-dap backend hid` 应放在目标配置加载之后；如果目标配置已经选择了
-CMSIS-DAP 驱动，不要重复加载 `interface/cmsis-dap.cfg`。OpenOCD 被 IDE 自动启动时，
+协议 v2 性能测试必须使用 `cmsis-dap backend usb_bulk`；若日志先报告 Bulk 设备权限错误、
+随后仍显示探针就绪，说明 OpenOCD 已回退到 HID。后端选择应放在目标配置加载之后；如果
+目标配置已经选择了 CMSIS-DAP 驱动，不要重复加载 `interface/cmsis-dap.cfg`。OpenOCD 被 IDE 自动启动时，
 将 OpenOCD 可执行文件设置为仓库内的 `tools/openocd-no-udev.sh`，并先在终端执行
 一次 `sudo -v`。
 
@@ -197,7 +225,7 @@ sudo udevadm trigger
 ```bash
 openocd \
   -f interface/cmsis-dap.cfg \
-  -c "cmsis-dap backend hid" \
+  -c "cmsis-dap backend usb_bulk" \
   -c "transport select swd" \
   -c "adapter speed 1000" \
   -f target/stm32f1x.cfg
@@ -208,7 +236,7 @@ openocd \
 ```bash
 openocd \
   -f interface/cmsis-dap.cfg \
-  -c "cmsis-dap backend hid" \
+  -c "cmsis-dap backend usb_bulk" \
   -c "transport select swd" \
   -c "adapter speed 500" \
   -f target/stm32f1x.cfg \

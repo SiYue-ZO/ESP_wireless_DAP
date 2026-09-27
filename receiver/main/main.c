@@ -95,25 +95,39 @@ static esp_err_t target_uart_init(void)
 static void dap_task(void *argument)
 {
     (void)argument;
+    _Static_assert(DAP_PACKET_SIZE == WIRELESS_LINK_DAP_PACKET_SIZE,
+                   "DAP engine and wireless packet sizes must match");
     uint8_t request[DAP_PACKET_SIZE];
     uint8_t response[DAP_PACKET_SIZE];
 
     while (true) {
+        size_t request_length;
         uint16_t sequence;
-        if (wireless_link_dap_receive(request, &sequence, portMAX_DELAY) != ESP_OK) {
+        if (wireless_link_dap_receive(request, &request_length, &sequence,
+                                      portMAX_DELAY) != ESP_OK) {
             continue;
         }
         memset(response, 0, sizeof(response));
 #if CONFIG_WIRELESS_DAP_DIAGNOSTICS
         const int64_t execute_start_us = esp_timer_get_time();
 #endif
-        (void)dap_protocol_execute(request, sizeof(request), response);
+        (void)dap_protocol_execute(request, (uint16_t)request_length, response);
 #if CONFIG_WIRELESS_DAP_DIAGNOSTICS
         ESP_LOGI(TAG, "dap seq=%u execute=%" PRId64 " us", sequence,
                  esp_timer_get_time() - execute_start_us);
 #endif
-        if (wireless_link_dap_reply(sequence, response) == ESP_OK) {
+        if (wireless_link_dap_reply(sequence, response, request_length) == ESP_OK) {
             status_led_pulse_activity();
+        }
+    }
+}
+
+static void dap_abort_task(void *argument)
+{
+    (void)argument;
+    while (true) {
+        if (wireless_link_dap_receive_abort(portMAX_DELAY) == ESP_OK) {
+            dap_protocol_abort_transfer();
         }
     }
 }
@@ -177,6 +191,8 @@ void app_main(void)
 
     if (xTaskCreatePinnedToCore(
             dap_task, "dap_swd", 6144, NULL, 12, NULL, 1) != pdPASS ||
+        xTaskCreatePinnedToCore(
+            dap_abort_task, "dap_abort", 2048, NULL, 13, NULL, 1) != pdPASS ||
         xTaskCreate(
             uart_to_wireless_task, "uart_to_radio", 4096, NULL, 8, NULL) != pdPASS ||
         xTaskCreate(

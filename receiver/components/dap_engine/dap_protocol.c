@@ -8,9 +8,16 @@
 #include "esp_rom_sys.h"
 
 static dap_state_t s_dap;
-static volatile bool s_transfer_abort;
+static volatile uint32_t s_abort_generation;
+static uint32_t s_active_transfer_generation;
+static uint16_t s_packet_capacity = DAP_PACKET_SIZE;
 
 #define DAP_WRITE_FINISH_RECOVERY_RETRIES 2U
+
+static bool dap_transfer_aborted(void)
+{
+    return s_abort_generation != s_active_transfer_generation;
+}
 
 /** @brief 标记当前 USB/DAP 会话已锁定到选定包大小。 */
 static void dap_lock_packet_size(void)
@@ -45,7 +52,7 @@ static void dap_write_u32(uint8_t *data, uint32_t value)
 /** @brief 在响应缓冲区空间足够时追加小端 32 位值。 */
 static bool dap_append_u32(uint8_t *response, uint16_t *offset, uint32_t value)
 {
-    if ((*offset + 4U) > DAP_PACKET_SIZE) {
+    if ((*offset + 4U) > s_packet_capacity) {
         return false;
     }
     dap_write_u32(&response[*offset], value);
@@ -70,7 +77,8 @@ static uint8_t dap_swd_transfer_retry(uint8_t request, uint32_t *data, uint32_t 
     uint8_t ack;
     do {
         ack = dap_swd_transfer(request, data, &s_dap.transfer, timestamp);
-    } while ((ack == DAP_TRANSFER_WAIT) && (retry-- != 0U) && !s_transfer_abort);
+    } while ((ack == DAP_TRANSFER_WAIT) && (retry-- != 0U) &&
+             !dap_transfer_aborted());
     return ack;
 }
 
@@ -95,7 +103,7 @@ static uint8_t dap_swd_finish_write(void)
         if (ack == DAP_TRANSFER_OK || ack == DAP_TRANSFER_WAIT || ack == DAP_TRANSFER_FAULT) {
             break;
         }
-    } while (recovery_retries-- != 0U && !s_transfer_abort);
+    } while (recovery_retries-- != 0U && !dap_transfer_aborted());
 
     return ack;
 }
@@ -220,7 +228,8 @@ static uint16_t dap_cmd_swd_sequence(const uint8_t *request, uint8_t *response, 
     response[0] = ID_DAP_SWD_Sequence;
     response[1] = (s_dap.active_port == DAP_PORT_SWD) ? DAP_OK : DAP_ERROR;
 
-    while ((sequence_count-- != 0U) && in < DAP_PACKET_SIZE && out < DAP_PACKET_SIZE) {
+    while ((sequence_count-- != 0U) && in < s_packet_capacity &&
+           out < s_packet_capacity) {
         const uint8_t info = request[in++];
         uint32_t bit_count = info & SWD_SEQUENCE_CLK;
         if (bit_count == 0U) {
@@ -229,13 +238,13 @@ static uint16_t dap_cmd_swd_sequence(const uint8_t *request, uint8_t *response, 
         const uint16_t byte_count = (uint16_t)((bit_count + 7U) / 8U);
 
         if ((info & SWD_SEQUENCE_DIN) != 0U) {
-            if ((uint16_t)(out + byte_count) > DAP_PACKET_SIZE) {
+            if ((uint16_t)(out + byte_count) > s_packet_capacity) {
                 break;  // 响应缓冲区不足，停止以避免越界写
             }
             dap_swd_sequence(info, NULL, &response[out]);
             out = (uint16_t)(out + byte_count);
         } else {
-            if ((uint16_t)(in + byte_count) > DAP_PACKET_SIZE) {
+            if ((uint16_t)(in + byte_count) > s_packet_capacity) {
                 break;  // 请求已耗尽，停止以避免越界读
             }
             dap_swd_sequence(info, &request[in], NULL);
@@ -283,7 +292,7 @@ static uint8_t dap_process_transfer_item(uint8_t request_value, const uint8_t **
             } while ((ack == DAP_TRANSFER_OK) &&
                      ((data & s_dap.transfer.match_mask) != match_value) &&
                      (match_retry-- != 0U) &&
-                     !s_transfer_abort);
+                     !dap_transfer_aborted());
             if ((ack == DAP_TRANSFER_OK) && ((data & s_dap.transfer.match_mask) != match_value)) {
                 ack |= DAP_TRANSFER_MISMATCH;
             }
@@ -326,17 +335,25 @@ static uint16_t dap_cmd_transfer(const uint8_t *request, uint8_t *response, uint
     uint8_t request_count = request[2];
     bool check_write = false;
 
-    s_transfer_abort = false;
+    s_active_transfer_generation = s_abort_generation;
     response[0] = ID_DAP_Transfer;
 
     if (s_dap.active_port != DAP_PORT_SWD) {
+        while (request_count-- != 0U) {
+            const uint8_t request_value = *cursor++;
+            if (((request_value & DAP_TRANSFER_RnW) == 0U) ||
+                ((request_value & DAP_TRANSFER_MATCH_VALUE) != 0U)) {
+                cursor += 4;
+            }
+        }
         response[1] = 0U;
         response[2] = 0U;
-        *consumed = 3U;
+        *consumed = (uint16_t)(cursor - request);
         return 3U;
     }
 
-    while ((request_count != 0U) && !s_transfer_abort && out < DAP_PACKET_SIZE) {
+    while ((request_count != 0U) && !dap_transfer_aborted() &&
+           out < s_packet_capacity) {
         request_count--;
         const uint8_t request_value = *cursor++;
         response_value = dap_process_transfer_item(request_value, &cursor, response, &out, &check_write);
@@ -369,29 +386,49 @@ static uint16_t dap_cmd_transfer(const uint8_t *request, uint8_t *response, uint
 }
 
 /** @brief 处理面向 SWD 的 DAP_TransferBlock。 */
-static uint16_t dap_cmd_transfer_block(const uint8_t *request, uint8_t *response, uint16_t *consumed)
+static uint16_t dap_cmd_transfer_block(const uint8_t *request, uint16_t request_len,
+                                       uint8_t *response, uint16_t *consumed)
 {
     dap_lock_active_session();
 
+    response[0] = ID_DAP_TransferBlock;
+    if (request_len < 5U) {
+        response[1] = 0U;
+        response[2] = 0U;
+        response[3] = DAP_TRANSFER_ERROR;
+        *consumed = request_len;
+        return 4U;
+    }
+
     uint16_t request_count = (uint16_t)request[2] | ((uint16_t)request[3] << 8);
     const uint8_t request_value = request[4];
+    if ((request_value & DAP_TRANSFER_RnW) == 0U &&
+        request_count > (uint16_t)((request_len - 5U) / 4U)) {
+        response[1] = 0U;
+        response[2] = 0U;
+        response[3] = DAP_TRANSFER_ERROR;
+        *consumed = request_len;
+        return 4U;
+    }
     const uint8_t *cursor = &request[5];
     uint16_t response_count = 0;
     uint8_t response_value = 0;
     uint16_t out = 4U;
 
-    s_transfer_abort = false;
-    response[0] = ID_DAP_TransferBlock;
-
+    s_active_transfer_generation = s_abort_generation;
     if (s_dap.active_port != DAP_PORT_SWD) {
+        if ((request_value & DAP_TRANSFER_RnW) == 0U) {
+            cursor += (uint32_t)request_count * 4U;
+        }
         response[1] = 0U;
         response[2] = 0U;
         response[3] = 0U;
-        *consumed = 5U;
+        *consumed = (uint16_t)(cursor - request);
         return 4U;
     }
 
-    while ((request_count != 0U) && !s_transfer_abort && out < DAP_PACKET_SIZE) {
+    while ((request_count != 0U) && !dap_transfer_aborted() &&
+           out < s_packet_capacity) {
         request_count--;
         uint32_t data = 0;
         uint32_t timestamp = 0;
@@ -460,7 +497,7 @@ static uint16_t dap_process_command(const uint8_t *request, uint16_t request_len
     case ID_DAP_Transfer:
         return dap_cmd_transfer(request, response, consumed);
     case ID_DAP_TransferBlock:
-        return dap_cmd_transfer_block(request, response, consumed);
+        return dap_cmd_transfer_block(request, request_len, response, consumed);
     case ID_DAP_WriteABORT: {
         dap_lock_active_session();
         const uint32_t value = dap_read_u32(&request[2]);
@@ -531,21 +568,23 @@ void dap_protocol_init(void)
     s_dap.transfer.turnaround_cycles = 1U;
     s_dap.transfer.always_generate_data_phase = false;
     s_dap.active_port = DAP_PORT_DISABLED;
-    s_transfer_abort = false;
+    s_abort_generation = 0U;
+    s_active_transfer_generation = 0U;
 
     dap_gpio_init();
 }
 
 void dap_protocol_abort_transfer(void)
 {
-    s_transfer_abort = true;
+    s_abort_generation++;
 }
 
 uint16_t dap_protocol_execute(const uint8_t *request, uint16_t request_len, uint8_t *response)
 {
-    if (request_len == 0U) {
+    if (request_len == 0U || request_len > DAP_PACKET_SIZE) {
         return 0U;
     }
+    s_packet_capacity = request_len;
 
     if (request[0] != ID_DAP_ExecuteCommands) {
         uint16_t consumed = 0;
@@ -553,21 +592,33 @@ uint16_t dap_protocol_execute(const uint8_t *request, uint16_t request_len, uint
     }
 
     response[0] = ID_DAP_ExecuteCommands;
-    response[1] = request[1];
+    response[1] = 0U;
 
     uint16_t in = 2U;
     uint16_t out = 2U;
     uint8_t command_count = request[1];
-    while ((command_count-- != 0U) && in < request_len && out < DAP_PACKET_SIZE) {
+    uint8_t executed_count = 0U;
+    const uint32_t execute_abort_generation = s_abort_generation;
+    while ((command_count-- != 0U) && in < request_len &&
+           out < s_packet_capacity) {
+        uint8_t command_response[DAP_PACKET_SIZE] = {0};
         uint16_t consumed = 0;
-        const uint16_t written = dap_process_command(&request[in], (uint16_t)(request_len - in), &response[out],
-                                                     &consumed);
+        const uint16_t remaining_request = (uint16_t)(request_len - in);
+        const uint16_t written = dap_process_command(
+            &request[in], remaining_request, command_response, &consumed);
+        if (consumed == 0U || consumed > remaining_request || written == 0U ||
+            written > (uint16_t)(s_packet_capacity - out)) {
+            break;
+        }
+        memcpy(&response[out], command_response, written);
         in = (uint16_t)(in + consumed);
         out = (uint16_t)(out + written);
-        if (consumed == 0U || written == 0U) {
+        executed_count++;
+        if (s_abort_generation != execute_abort_generation) {
             break;
         }
     }
+    response[1] = executed_count;
 
     return out;
 }

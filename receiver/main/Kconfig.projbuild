@@ -22,15 +22,47 @@ config WIRELESS_DAP_PROTOCOL_VERSION
     default 1
     help
         Version 1 is the stable 64-byte HID baseline. Version 2 enables the
-        capability-negotiation skeleton; both boards must use the same value.
+        capability negotiation and ESP-NOW v2 discovery frame; both boards
+        must use the same value and support ESP-NOW v2.
 
 config WIRELESS_DAP_V2_PACKET_WINDOW
     int "Protocol v2 packet window"
-    range 1 1
+    range 1 2
     default 1
     depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
     help
-        The first v2 implementation is ordered and uses window 1.
+        Accept one or two independent DAP requests in flight. Requests are
+        always executed in window order. A receiver configured for 2 remains
+        compatible with a transmitter using window 1.
+
+choice WIRELESS_DAP_V2_DAP_PACKET_SIZE
+    prompt "Protocol v2 DAP packet size"
+    default WIRELESS_DAP_V2_DAP_PACKET_64
+    depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
+
+config WIRELESS_DAP_V2_DAP_PACKET_64
+    bool "64 bytes"
+
+config WIRELESS_DAP_V2_DAP_PACKET_256
+    bool "256 bytes"
+
+endchoice
+
+config WIRELESS_DAP_DAP_PACKET_SIZE
+    int
+    default 256 if WIRELESS_DAP_V2_DAP_PACKET_256
+    default 64
+
+config WIRELESS_DAP_HID_AGGREGATION
+    bool "Enable HID64 request aggregation support"
+    default n
+    depends on WIRELESS_DAP_PROTOCOL_VERSION = 2
+    depends on WIRELESS_DAP_V2_DAP_PACKET_256
+    depends on WIRELESS_DAP_V2_PACKET_WINDOW = 1
+    help
+        Advertise support for transmitter-side HID64 aggregation using the
+        standard DAP_ExecuteCommands wrapper. Enable the matching transmitter
+        option.
 
 config WIRELESS_DAP_TX_DELAY_MS
     int "ESP-NOW TX pacing delay (ms)"
